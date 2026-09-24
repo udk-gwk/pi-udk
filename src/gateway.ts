@@ -17,6 +17,13 @@ export const DEFAULT_API_BASE = "https://api.udk.digital";
 
 export type GatewayErrorKind = "credentials" | "network" | "server" | "unsupported" | "cancelled";
 
+/** authentik flow page `/if/flow/<slug>/?…` → its JSON executor URL, else undefined. */
+export function flowExecutorUrl(page: URL): URL | undefined {
+	const match = /^\/if\/flow\/([^/]+)\/?$/.exec(page.pathname);
+	if (!match) return undefined;
+	return new URL(`/api/v3/flows/executor/${match[1]}/?query=${encodeURIComponent(page.search.slice(1))}`, page);
+}
+
 export class GatewayError extends Error {
 	readonly kind: GatewayErrorKind;
 	constructor(message: string, kind: GatewayErrorKind = "server") {
@@ -248,16 +255,16 @@ export class GatewayClient {
 		// Already-authenticated sessions can skip straight to the callback (not in a fresh jar, but be safe).
 		let code: string | undefined;
 		if (!isCallback(landingUrl, callback)) {
-			const match = /^\/if\/flow\/([^/]+)\/?$/.exec(landingUrl.pathname);
-			if (!match) throw new GatewayError(`Unexpected login page: ${landingUrl.pathname}`, "unsupported");
-			const flowSlug = match[1];
-			const executor = new URL(
-				`/api/v3/flows/executor/${flowSlug}/?query=${encodeURIComponent(landingUrl.search.slice(1))}`,
-				landingUrl,
-			);
+			const executor = flowExecutorUrl(landingUrl);
+			if (!executor) throw new GatewayError(`Unexpected login page: ${landingUrl.pathname}`, "unsupported");
 			onProgress("Checking credentials…");
 			const next = await this.runAuthentikFlow(executor, username, password, jar);
-			landingUrl = await this.followToCallback(new URL(next, executor), callback, jar);
+			// After authentication authentik goes back to /authorize, which usually starts a second
+			// flow (the provider's authorization/consent flow). Drive every flow page the same way.
+			landingUrl = await this.followToCallback(new URL(next, executor), callback, jar, async (flowExecutor) => {
+				onProgress("Confirming access…");
+				return this.runAuthentikFlow(flowExecutor, username, password, jar);
+			});
 		}
 		code = landingUrl.searchParams.get("code") ?? undefined;
 		const returnedState = landingUrl.searchParams.get("state");
@@ -393,17 +400,28 @@ export class GatewayClient {
 		}
 	}
 
-	private async followToCallback(start: URL, callback: string, jar: CookieJar): Promise<URL> {
+	private async followToCallback(
+		start: URL,
+		callback: string,
+		jar: CookieJar,
+		runFlow: (executor: URL) => Promise<string>,
+	): Promise<URL> {
 		let url = start;
-		for (let i = 0; i < 8; i++) {
+		let flows = 0;
+		for (let i = 0; i < 12; i++) {
 			if (isCallback(url, callback)) return url;
+			const executor = flowExecutorUrl(url);
+			if (executor) {
+				if (++flows > 3) throw new GatewayError("UdK login went through too many steps.", "server");
+				url = new URL(await runFlow(executor), executor);
+				continue;
+			}
 			const response = await this.fetchRaw(url, { method: "GET", headers: { accept: "text/html" } }, jar);
 			const loc = response.headers.get("location");
 			if (response.status >= 300 && response.status < 400 && loc) {
 				url = new URL(loc, url);
 				continue;
 			}
-			// authentik can render the consent/redirect step as a flow page; not expected for this provider.
 			throw new GatewayError(`UdK login stopped at ${url.host}${url.pathname} (HTTP ${response.status}).`, "unsupported");
 		}
 		throw new GatewayError("UdK login redirected too many times.", "server");

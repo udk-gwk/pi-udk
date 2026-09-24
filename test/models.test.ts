@@ -28,3 +28,13 @@ test("quota formatting", () => {
 	assert.equal(formatQuota(250000, 500000, ""), "0.50 credits");
 	assert.equal(formatQuota(436751554, 500000, ""), "874 credits");
 });
+
+test("authentik flow pages map to their executor URL", async () => {
+	const { flowExecutorUrl } = await import("../src/gateway.ts");
+	const page = new URL("https://auth.udk.digital/if/flow/default-provider-authorization-explicit-consent/?client_id=x&state=a%20b");
+	assert.equal(
+		flowExecutorUrl(page)?.href,
+		"https://auth.udk.digital/api/v3/flows/executor/default-provider-authorization-explicit-consent/?query=client_id%3Dx%26state%3Da%2520b",
+	);
+	assert.equal(flowExecutorUrl(new URL("https://api.udk.digital/oauth/oidc?code=1")), undefined);
+});
