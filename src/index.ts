@@ -19,6 +19,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { BorderedLoader } from "@earendil-works/pi-coding-agent";
 import { type DashboardSession, DEFAULT_API_BASE, GatewayClient, GatewayError, formatQuota } from "./gateway.ts";
+import { explainGatewayError } from "./errors.ts";
 import { createForm, type FormResult } from "./form.ts";
 import {
 	ALIASES,
@@ -76,6 +77,15 @@ export default function udk(pi: ExtensionAPI) {
 					ctx.ui.notify(`Unknown subcommand "${sub}". Try /udk, /udk status, /udk models, /udk key, /udk logout.`, "warning");
 			}
 		},
+	});
+
+	// Rewrite gateway errors (Chinese quota messages, "no channel under group …") into actionable text.
+	pi.on("message_end", (event) => {
+		const msg = event.message as { role?: string; provider?: string; model?: string; stopReason?: string; errorMessage?: string };
+		if (msg.role !== "assistant" || msg.provider !== PROVIDER_ID || msg.stopReason !== "error" || !msg.errorMessage) return;
+		const friendly = explainGatewayError(msg.errorMessage, msg.model);
+		if (!friendly) return;
+		return { message: { ...event.message, errorMessage: `${friendly}\n[gateway: ${gatewayDetail(msg.errorMessage)}]` } as typeof event.message };
 	});
 
 	pi.on("session_start", async (event, ctx) => {
@@ -230,10 +240,28 @@ async function onboard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<
 		return;
 	}
 
+	return onboardPickAgain(pi, ctx, ids, key);
+}
+
+async function onboardPickAgain(pi: ExtensionAPI, ctx: ExtensionCommandContext, ids: string[], key: string): Promise<void> {
 	const chosen = await pickModel(ctx, ids);
 	if (!chosen) {
 		ctx.ui.notify("Key saved. Pick a UdK model any time with /model.", "info");
 		return;
+	}
+	if (isExternal(chosen)) {
+		const ok = await ctx.ui.confirm(
+			"External model",
+			[
+				`${chosen} does not run at UdK. Everything you send it — your messages and any file`,
+				"contents or command output pi reads while working — goes to an outside company",
+				chosen.startsWith("cc/") ? "(Anthropic, USA)." : "(OpenAI, USA).",
+				"",
+				"Don't use it for personal data, unpublished work of others, or anything confidential.",
+				"Use it anyway?",
+			].join("\n"),
+		);
+		if (!ok) return onboardPickAgain(pi, ctx, ids, key);
 	}
 	const model = ctx.modelRegistry.find(PROVIDER_ID, chosen);
 	if (!model || !(await pi.setModel(model))) {
@@ -479,7 +507,10 @@ async function testModel(ctx: ExtensionCommandContext, modelId: string): Promise
 				},
 				{ signal },
 			);
-			if (res.stopReason === "error") throw new Error(res.errorMessage || "model returned an error");
+			if (res.stopReason === "error") {
+				const raw = res.errorMessage || "model returned an error";
+				throw new Error(explainGatewayError(raw, modelId) ?? raw);
+			}
 			return res.content
 				.filter((c): c is { type: "text"; text: string } => c.type === "text")
 				.map((c) => c.text)
@@ -614,6 +645,13 @@ async function withLoader<T>(
 	});
 	if (failed) throw failure;
 	return result;
+}
+
+/** The gateway's own message without the JSON wrapper, for the bracketed detail line. */
+function gatewayDetail(raw: string): string {
+	const m = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(raw);
+	const text = m ? JSON.parse(`"${m[1]}"`) : raw;
+	return text.length > 300 ? `${text.slice(0, 300)}…` : text;
 }
 
 function errorText(error: unknown): string {

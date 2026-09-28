@@ -39,8 +39,9 @@ const KNOWN: Record<string, ModelInfo> = {
 		tier: "alias",
 		contextWindow: 128 * K,
 		maxTokens: 32 * K,
-		vision: true,
-		blurb: "quickest answers, understands images, runs on UdK hardware",
+		// the backing channel rejects images ("current GGUF model does not support vision"), probed 2026-09-28
+		vision: false,
+		blurb: "quickest answers, runs on UdK hardware",
 	},
 	large: {
 		name: "UdK large",
@@ -48,7 +49,7 @@ const KNOWN: Record<string, ModelInfo> = {
 		contextWindow: 128 * K,
 		maxTokens: 32 * K,
 		vision: true,
-		blurb: "the biggest model UdK hosts for you right now",
+		blurb: "the biggest model UdK hosts for you right now, understands images",
 	},
 	"qwen3.8-flash-next": { name: "Qwen3.8 Flash Next", tier: "local", contextWindow: 128 * K, maxTokens: 32 * K, vision: true },
 	"Qwen3.8-27B": { name: "Qwen3.8 27B", tier: "local", contextWindow: 256 * K, maxTokens: 32 * K, vision: true },
